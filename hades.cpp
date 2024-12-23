@@ -143,7 +143,9 @@ int main() {
   std::cout << "Right rotation of #1 by 2: " << plaintextRot4 << std::endl;
 
   std::cout << std::endl;
-  std::cout << "===== HPDIC ===== " << std::endl;
+  std::cout << "======================= " << std::endl;
+  std::cout << "===== HPDIC Hades ===== " << std::endl;
+  std::cout << "======================= " << std::endl;
   std::cout << std::endl;
 
   return 0;

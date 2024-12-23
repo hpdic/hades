@@ -21,3 +21,12 @@ target_link_libraries(hades
     OPENFHEpke
     OPENFHEbinfhe
 )
+
+add_executable(hades_ckks hades_ckks.cpp)
+
+# 链接同样的库
+target_link_libraries(hades_ckks
+    OPENFHEcore
+    OPENFHEpke
+    OPENFHEbinfhe
+)
