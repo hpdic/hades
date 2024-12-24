@@ -33,13 +33,159 @@
 //==================================================================================
 
 /*
-  Simple example for BFVrns (integer arithmetic)
+  HPDIC: Basic Hades
  */
 
 #include "openfhe.h"
+#include <chrono>
+#include <iostream>
+#include <vector>
 // #include <openfhe.h>
 
 using namespace lbcrypto;
+
+// Hades Basic: Key Generation
+struct HadesBasicKey {
+  CryptoContext<DCRTPoly> cryptoContext;
+  KeyPair<DCRTPoly> keyPair;
+  PrivateKey<DCRTPoly> compareEvalKey; // Compare-Eval Key (CEK) as Ciphertext
+};
+
+HadesBasicKey hades_basic_keygen() {
+  // Set up BFV parameters
+  CCParams<CryptoContextBFVRNS> parameters;
+  parameters.SetPlaintextModulus(
+      65537); // A large prime number for plaintext modulus
+  parameters.SetMultiplicativeDepth(2); // Adjust depth as needed
+
+  CryptoContext<DCRTPoly> cryptoContext = GenCryptoContext(parameters);
+  cryptoContext->Enable(PKE);
+  cryptoContext->Enable(KEYSWITCH);
+  cryptoContext->Enable(LEVELEDSHE);
+
+  // Generate key pair
+  KeyPair<DCRTPoly> keyPair = cryptoContext->KeyGen();
+
+  // Extract the private key polynomial
+  auto secretKeyPoly = keyPair.secretKey->GetPrivateElement();
+
+  // Scale the private key
+  int scale = rand() % 10 + 1; // Random scale factor between 1 and 10
+  auto scaledSecretKeyPoly = secretKeyPoly * scale;
+
+  // Add random noise to the scaled private key
+  std::vector<int64_t> randomNoise = {rand() % 3, rand() % 3, rand() % 3};
+  for (size_t i = 0; i < randomNoise.size(); ++i) {
+    auto noisePoly =
+        scaledSecretKeyPoly.GetElementAtIndex(0); // 获取 CRT 多项式
+    noisePoly[i].ModAddEq(randomNoise[i],
+                          noisePoly.GetModulus());       // 模加随机噪声
+    scaledSecretKeyPoly.SetElementAtIndex(0, noisePoly); // 更新 CRT 元素
+  }
+  // DFZ: OpenFHE doesn't support index operator:
+//   for (size_t i = 0; i < randomNoise.size(); ++i) {
+//     scaledSecretKeyPoly[i] += randomNoise[i];
+//   }
+
+  // Wrap the modified private key back into a PrivateKey structure
+  PrivateKey<DCRTPoly> compareEvalKey =
+      std::make_shared<PrivateKeyImpl<DCRTPoly>>(
+          keyPair.secretKey->GetCryptoContext());
+  compareEvalKey->SetPrivateElement(scaledSecretKeyPoly);
+
+  return {cryptoContext, keyPair, compareEvalKey};
+}
+
+// Hades Basic: Encryption
+Ciphertext<DCRTPoly> hades_basic_encrypt(const HadesBasicKey &hadesKey,
+                                         const int64_t plaintextValue) {
+  // Create plaintext object
+  Plaintext plaintext =
+      hadesKey.cryptoContext->MakePackedPlaintext({plaintextValue});
+
+  // Encrypt plaintext to generate ciphertext
+  return hadesKey.cryptoContext->Encrypt(hadesKey.keyPair.publicKey, plaintext);
+}
+
+// Hades Basic: Comparison
+int hades_basic_compare(const HadesBasicKey &hadesKey,
+                        const Ciphertext<DCRTPoly> &ctA,
+                        const Ciphertext<DCRTPoly> &ctB) {
+  // Subtract ciphertexts to compute the difference (ctA - ctB)
+  auto ctDelta = hadesKey.cryptoContext->EvalSub(ctA, ctB);
+
+  // Decrypt the result using CEK
+  Plaintext decryptedDelta;
+  hadesKey.cryptoContext->Decrypt(hadesKey.compareEvalKey, ctDelta,
+                                  &decryptedDelta);
+
+  // Ensure the plaintext has the correct length
+  decryptedDelta->SetLength(1);
+
+  // Extract the scalar value from the decrypted result
+  int64_t deltaValue = decryptedDelta->GetPackedValue()[0];
+
+  // Interpret the result: 1 (A > B), 0 (A == B), -1 (A < B)
+  if (deltaValue > 0) {
+    return 1;
+  } else if (deltaValue == 0) {
+    return 0;
+  } else {
+    return -1;
+  }
+}
+
+// Function to test HADES Basic
+void test_hades_basic(const std::vector<int> &inputIntegers) {
+  using Clock = std::chrono::high_resolution_clock;
+
+  // Step 1: Measure key generation time
+  auto startKeygen = Clock::now();
+  auto hadesKey = hades_basic_keygen();
+  auto endKeygen = Clock::now();
+  auto keygenTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                        endKeygen - startKeygen)
+                        .count();
+
+  // Step 2: Measure encryption time
+  std::vector<Ciphertext<DCRTPoly>> encryptedIntegers;
+  auto startEncrypt = Clock::now();
+  for (const auto &val : inputIntegers) {
+    auto ct = hades_basic_encrypt(hadesKey, val);
+    encryptedIntegers.push_back(ct);
+  }
+  auto endEncrypt = Clock::now();
+  auto encryptTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endEncrypt - startEncrypt)
+                         .count();
+  double avgEncryptTime =
+      static_cast<double>(encryptTime) / inputIntegers.size();
+
+  // Step 3: Measure pair-wise comparison time
+  auto startCompare = Clock::now();
+  for (size_t i = 0; i < encryptedIntegers.size(); ++i) {
+    for (size_t j = i + 1; j < encryptedIntegers.size(); ++j) {
+      int result = hades_basic_compare(hadesKey, encryptedIntegers[i],
+                                       encryptedIntegers[j]);
+      (void)result; // Ignore the result in this benchmark
+    }
+  }
+  auto endCompare = Clock::now();
+  auto compareTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endCompare - startCompare)
+                         .count();
+  size_t totalPairs = (inputIntegers.size() * (inputIntegers.size() - 1)) / 2;
+  double avgCompareTime = static_cast<double>(compareTime) / totalPairs;
+
+  // Output results
+  std::cout << "HADES Basic Test Results:" << std::endl;
+  std::cout << "Key Generation Time: " << keygenTime << " microseconds"
+            << std::endl;
+  std::cout << "Average Encryption Time: " << avgEncryptTime
+            << " microseconds per integer" << std::endl;
+  std::cout << "Average Comparison Time: " << avgCompareTime
+            << " microseconds per pair" << std::endl;
+}
 
 int main() {
   // Sample Program: Step 1: Set CryptoContext
@@ -147,6 +293,9 @@ int main() {
   std::cout << "===== HPDIC Hades ===== " << std::endl;
   std::cout << "======================= " << std::endl;
   std::cout << std::endl;
+
+  std::vector<int> test_vec = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  test_hades_basic(test_vec);
 
   return 0;
 }
