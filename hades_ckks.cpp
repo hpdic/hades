@@ -158,8 +158,13 @@ int hades_basic_compare(const HadesBasicKey &hadesKey,
 void test_hades_basic(const std::vector<double> &inputValues) {
   using Clock = std::chrono::high_resolution_clock;
 
-  // Step 1: Generate key
+  // Step 1: Measure key generation time
+  auto startKeygen = Clock::now();
   auto hadesKey = hades_basic_keygen();
+  auto endKeygen = Clock::now();
+  auto keygenTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                        endKeygen - startKeygen)
+                        .count();
 
   // Step 2: Measure encryption time
   std::vector<Ciphertext<DCRTPoly>> encryptedValues;
@@ -180,7 +185,7 @@ void test_hades_basic(const std::vector<double> &inputValues) {
     for (size_t j = i + 1; j < encryptedValues.size(); ++j) {
       int result =
           hades_basic_compare(hadesKey, encryptedValues[i], encryptedValues[j]);
-      (void)result;
+      (void)result; // Ignore result for benchmarking
     }
   }
   auto endCompare = Clock::now();
@@ -192,6 +197,8 @@ void test_hades_basic(const std::vector<double> &inputValues) {
 
   // Output results
   std::cout << "HADES CKKS Basic Test Results:" << std::endl;
+  std::cout << "Key Generation Time: " << keygenTime << " microseconds"
+            << std::endl;
   std::cout << "Average Encryption Time: " << avgEncryptTime
             << " microseconds per value" << std::endl;
   std::cout << "Average Comparison Time: " << avgCompareTime
