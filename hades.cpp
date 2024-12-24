@@ -38,11 +38,40 @@
 
 #include "openfhe.h"
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <vector>
+
 // #include <openfhe.h>
 
 using namespace lbcrypto;
+
+const int PLAINTEXT_MODULUS = 65537; // Default plaintext modulus / 2
+const size_t MAX_DATA_POINTS = 100;  // Limit to first 100 data points
+
+// Function to read data from a file, convert to integers, and apply modulus
+std::vector<int> readDataFromFile(const std::string &filePath) {
+  std::vector<int> data;
+  std::ifstream file(filePath);
+  if (!file.is_open()) {
+    throw std::runtime_error("Could not open file: " + filePath);
+  }
+
+  double value;
+  size_t count = 0;
+  while (file >> value && count < MAX_DATA_POINTS) {
+    int modValue = static_cast<int>(std::floor(value)) %
+                   PLAINTEXT_MODULUS; // Convert to integer and mod
+    if (modValue < 0) {
+      modValue %= -modValue % PLAINTEXT_MODULUS; // Ensure non-negative values
+    }
+    data.push_back(modValue);
+    count++;
+  }
+  file.close();
+
+  return data;
+}
 
 // Hades Basic: Key Generation
 struct HadesBasicKey {
@@ -133,6 +162,7 @@ Ciphertext<DCRTPoly> hades_fae_encrypt(const HadesBasicKey &hadesKey,
   for (size_t i = 0; i < packedValues.size(); ++i) {
     packedValues[i] =
         packedValues[i] * scale + static_cast<int64_t>(delta * scale);
+    packedValues[i] %= PLAINTEXT_MODULUS; // Make sure it's within MODULUS
   }
 
   // Add noise polynomial to the modified plaintext
@@ -275,107 +305,104 @@ void test_hades_fae(const std::vector<int> &inputIntegers) {
             << " microseconds per pair" << std::endl;
 }
 
+// Test function for HADES Basic
+void test_app_basic(const std::string &filePath) {
+  try {
+    std::vector<int> inputValues = readDataFromFile(filePath);
+    using Clock = std::chrono::high_resolution_clock;
+
+    // Step 1: Measure key generation time
+    auto startKeygen = Clock::now();
+    auto hadesKey = hades_basic_keygen();
+    auto endKeygen = Clock::now();
+    auto keygenTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          endKeygen - startKeygen)
+                          .count();
+
+    // Step 2: Measure encryption time
+    std::vector<Ciphertext<DCRTPoly>> encryptedValues;
+    auto startEncrypt = Clock::now();
+    for (const auto &val : inputValues) {
+      auto ct = hades_basic_encrypt(hadesKey, val);
+      encryptedValues.push_back(ct);
+    }
+    auto endEncrypt = Clock::now();
+    auto encryptTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           endEncrypt - startEncrypt)
+                           .count();
+
+    // Step 3: Measure pair-wise comparison time
+    auto startCompare = Clock::now();
+    for (size_t i = 0; i < encryptedValues.size(); ++i) {
+      for (size_t j = i + 1; j < encryptedValues.size(); ++j) {
+        int result = hades_basic_compare(hadesKey, encryptedValues[i],
+                                         encryptedValues[j]);
+        (void)result; // Ignore the result in this benchmark
+      }
+    }
+    auto endCompare = Clock::now();
+    auto compareTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           endCompare - startCompare)
+                           .count();
+
+    // Output results
+    std::cout << "HADES BFV Basic Test Results for file: " << filePath
+              << std::endl;
+    std::cout << "Total Key Generation Time: " << keygenTime << " ms"
+              << std::endl;
+    std::cout << "Total Encryption Time: " << encryptTime << " ms" << std::endl;
+    std::cout << "Total Comparison Time: " << compareTime << " ms" << std::endl;
+  } catch (const std::exception &e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+  }
+}
+
+// Test function for HADES FA-Extension
+void test_app_fae(const std::string &filePath) {
+  try {
+    std::vector<int> inputValues = readDataFromFile(filePath);
+    using Clock = std::chrono::high_resolution_clock;
+
+    // Step 1: Generate HADES key
+    auto hadesKey = hades_basic_keygen();
+
+    // Step 2: Measure encryption time
+    std::vector<Ciphertext<DCRTPoly>> encryptedValues;
+    auto startEncrypt = Clock::now();
+    for (const auto &val : inputValues) {
+      auto ct = hades_fae_encrypt(hadesKey, val);
+      encryptedValues.push_back(ct);
+    }
+    auto endEncrypt = Clock::now();
+    auto encryptTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           endEncrypt - startEncrypt)
+                           .count();
+
+    // Step 3: Measure pair-wise comparison time
+    auto startCompare = Clock::now();
+    for (size_t i = 0; i < encryptedValues.size(); ++i) {
+      for (size_t j = i + 1; j < encryptedValues.size(); ++j) {
+        int result = hades_basic_compare(hadesKey, encryptedValues[i],
+                                         encryptedValues[j]);
+        (void)result; // Ignore the result in this benchmark
+      }
+    }
+    auto endCompare = Clock::now();
+    auto compareTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           endCompare - startCompare)
+                           .count();
+
+    // Output results
+    std::cout << "HADES BFV FA-Extension Test Results for file: " << filePath
+              << std::endl;
+    std::cout << "Total Encryption Time: " << encryptTime << " ms" << std::endl;
+    std::cout << "Total Comparison Time: " << compareTime << " ms" << std::endl;
+  } catch (const std::exception &e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+  }
+}
+
 int main() {
-  // Sample Program: Step 1: Set CryptoContext
-  CCParams<CryptoContextBFVRNS> parameters;
-  parameters.SetPlaintextModulus(65537);
-  parameters.SetMultiplicativeDepth(2);
-
-  CryptoContext<DCRTPoly> cryptoContext = GenCryptoContext(parameters);
-  // Enable features that you wish to use
-  cryptoContext->Enable(PKE);
-  cryptoContext->Enable(KEYSWITCH);
-  cryptoContext->Enable(LEVELEDSHE);
-
-  // Sample Program: Step 2: Key Generation
-
-  // Initialize Public Key Containers
-  KeyPair<DCRTPoly> keyPair;
-
-  // Generate a public/private key pair
-  keyPair = cryptoContext->KeyGen();
-
-  // Generate the relinearization key
-  cryptoContext->EvalMultKeyGen(keyPair.secretKey);
-
-  // Generate the rotation evaluation keys
-  cryptoContext->EvalRotateKeyGen(keyPair.secretKey, {1, 2, -1, -2});
-
-  // Sample Program: Step 3: Encryption
-
-  // First plaintext vector is encoded
-  std::vector<int64_t> vectorOfInts1 = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-  Plaintext plaintext1 = cryptoContext->MakePackedPlaintext(vectorOfInts1);
-  // Second plaintext vector is encoded
-  std::vector<int64_t> vectorOfInts2 = {3, 2, 1, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-  Plaintext plaintext2 = cryptoContext->MakePackedPlaintext(vectorOfInts2);
-  // Third plaintext vector is encoded
-  std::vector<int64_t> vectorOfInts3 = {1, 2, 5, 2, 5, 6, 7, 8, 9, 10, 11, 12};
-  Plaintext plaintext3 = cryptoContext->MakePackedPlaintext(vectorOfInts3);
-
-  // The encoded vectors are encrypted
-  auto ciphertext1 = cryptoContext->Encrypt(keyPair.publicKey, plaintext1);
-  auto ciphertext2 = cryptoContext->Encrypt(keyPair.publicKey, plaintext2);
-  auto ciphertext3 = cryptoContext->Encrypt(keyPair.publicKey, plaintext3);
-
-  // Sample Program: Step 4: Evaluation
-
-  // Homomorphic additions
-  auto ciphertextAdd12 = cryptoContext->EvalAdd(ciphertext1, ciphertext2);
-  auto ciphertextAddResult =
-      cryptoContext->EvalAdd(ciphertextAdd12, ciphertext3);
-
-  // Homomorphic multiplications
-  auto ciphertextMul12 = cryptoContext->EvalMult(ciphertext1, ciphertext2);
-  auto ciphertextMultResult =
-      cryptoContext->EvalMult(ciphertextMul12, ciphertext3);
-
-  // Homomorphic rotations
-  auto ciphertextRot1 = cryptoContext->EvalRotate(ciphertext1, 1);
-  auto ciphertextRot2 = cryptoContext->EvalRotate(ciphertext1, 2);
-  auto ciphertextRot3 = cryptoContext->EvalRotate(ciphertext1, -1);
-  auto ciphertextRot4 = cryptoContext->EvalRotate(ciphertext1, -2);
-
-  // Sample Program: Step 5: Decryption
-
-  // Decrypt the result of additions
-  Plaintext plaintextAddResult;
-  cryptoContext->Decrypt(keyPair.secretKey, ciphertextAddResult,
-                         &plaintextAddResult);
-
-  // Decrypt the result of multiplications
-  Plaintext plaintextMultResult;
-  cryptoContext->Decrypt(keyPair.secretKey, ciphertextMultResult,
-                         &plaintextMultResult);
-
-  // Decrypt the result of rotations
-  Plaintext plaintextRot1;
-  cryptoContext->Decrypt(keyPair.secretKey, ciphertextRot1, &plaintextRot1);
-  Plaintext plaintextRot2;
-  cryptoContext->Decrypt(keyPair.secretKey, ciphertextRot2, &plaintextRot2);
-  Plaintext plaintextRot3;
-  cryptoContext->Decrypt(keyPair.secretKey, ciphertextRot3, &plaintextRot3);
-  Plaintext plaintextRot4;
-  cryptoContext->Decrypt(keyPair.secretKey, ciphertextRot4, &plaintextRot4);
-
-  plaintextRot1->SetLength(vectorOfInts1.size());
-  plaintextRot2->SetLength(vectorOfInts1.size());
-  plaintextRot3->SetLength(vectorOfInts1.size());
-  plaintextRot4->SetLength(vectorOfInts1.size());
-
-  std::cout << "Plaintext #1: " << plaintext1 << std::endl;
-  std::cout << "Plaintext #2: " << plaintext2 << std::endl;
-  std::cout << "Plaintext #3: " << plaintext3 << std::endl;
-
-  // Output results
-  std::cout << "\nResults of homomorphic computations" << std::endl;
-  std::cout << "#1 + #2 + #3: " << plaintextAddResult << std::endl;
-  std::cout << "#1 * #2 * #3: " << plaintextMultResult << std::endl;
-  std::cout << "Left rotation of #1 by 1: " << plaintextRot1 << std::endl;
-  std::cout << "Left rotation of #1 by 2: " << plaintextRot2 << std::endl;
-  std::cout << "Right rotation of #1 by 1: " << plaintextRot3 << std::endl;
-  std::cout << "Right rotation of #1 by 2: " << plaintextRot4 << std::endl;
-
   std::cout << std::endl;
   std::cout << "======================= " << std::endl;
   std::cout << "===== HPDIC Hades ===== " << std::endl;
@@ -386,5 +413,33 @@ int main() {
   test_hades_basic(test_vec);
   test_hades_fae(test_vec);
 
+  const std::string basePath = "../data/";
+  const std::vector<std::string> datasets = {"bitcoin", "covid19", "hg38"};
+
+  std::cout << "Select a dataset to test:\n";
+  for (size_t i = 0; i < datasets.size(); ++i) {
+    std::cout << i + 1 << ": " << datasets[i] << std::endl;
+  }
+  std::cout << "0: Exit" << std::endl;
+
+  int choice;
+  std::cin >> choice;
+
+  if (choice == 0) {
+    std::cout << "Exiting program." << std::endl;
     return 0;
+  }
+
+  if (choice < 1 || choice > static_cast<int>(datasets.size())) {
+    std::cerr << "Invalid choice. Exiting." << std::endl;
+    return 1;
+  }
+
+  std::string filePath = basePath + datasets[choice - 1];
+
+  // Run tests on the selected dataset
+  test_app_basic(filePath);
+  test_app_fae(filePath);
+
+  return 0;
 }
