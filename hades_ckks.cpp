@@ -41,12 +41,222 @@ Example for CKKS bootstrapping with full packing
 #define PROFILE
 
 #include "openfhe.h"
+#include <chrono>
+#include <iostream>
+#include <vector>
 
 using namespace lbcrypto;
 
+struct HadesBasicKey {
+  CryptoContext<DCRTPoly> cryptoContext;
+  KeyPair<DCRTPoly> keyPair;
+  PrivateKey<DCRTPoly> compareEvalKey; // Compare-Eval Key (CEK)
+};
+
+HadesBasicKey hades_basic_keygen() {
+  CCParams<CryptoContextCKKSRNS> parameters;
+
+  parameters.SetSecretKeyDist(
+      UNIFORM_TERNARY); // Use uniform ternary distribution
+  parameters.SetSecurityLevel(HEStd_128_classic); // Standard security level
+  parameters.SetRingDim(32768);                   // Set ring dimension
+  parameters.SetScalingModSize(59);               // Set scaling modulus
+  parameters.SetScalingTechnique(FIXEDAUTO);      // Scaling technique
+  parameters.SetFirstModSize(60);
+  parameters.SetMultiplicativeDepth(6);
+
+  CryptoContext<DCRTPoly> cryptoContext = GenCryptoContext(parameters);
+  cryptoContext->Enable(PKE);
+  cryptoContext->Enable(KEYSWITCH);
+  cryptoContext->Enable(LEVELEDSHE);
+
+  // Generate key pair
+  KeyPair<DCRTPoly> keyPair = cryptoContext->KeyGen();
+
+  // Generate CEK (Compare-Eval Key)
+  auto secretKeyPoly = keyPair.secretKey->GetPrivateElement();
+  int scale = rand() % 10 + 1;
+  auto scaledSecretKeyPoly = secretKeyPoly * scale;
+
+  PrivateKey<DCRTPoly> compareEvalKey =
+      std::make_shared<PrivateKeyImpl<DCRTPoly>>(
+          keyPair.secretKey->GetCryptoContext());
+  compareEvalKey->SetPrivateElement(scaledSecretKeyPoly);
+
+  return {cryptoContext, keyPair, compareEvalKey};
+}
+
+Ciphertext<DCRTPoly> hades_basic_encrypt(const HadesBasicKey &hadesKey,
+                                         const double plaintextValue) {
+  // Create plaintext object
+  Plaintext plaintext = hadesKey.cryptoContext->MakeCKKSPackedPlaintext(
+      {std::complex<double>(plaintextValue, 0.0)}, // Wrap as a complex number
+      20,                                           // Scale degree
+      0,                                           // Level
+      nullptr,                                     // Parameters
+      hadesKey.cryptoContext->GetRingDimension() / 2); // Number of slots
+
+  // Encrypt plaintext to generate ciphertext
+  return hadesKey.cryptoContext->Encrypt(hadesKey.keyPair.publicKey, plaintext);
+}
+
+Ciphertext<DCRTPoly> hades_fae_encrypt(const HadesBasicKey &hadesKey,
+                                       const double plaintextValue) {
+  // Step 1: Create plaintext object
+  Plaintext plaintext = hadesKey.cryptoContext->MakeCKKSPackedPlaintext(
+      {std::complex<double>(plaintextValue, 0.0)}, // Wrap as a complex number
+      20,                                           // Scale degree
+      0,                                           // Level
+      nullptr,                                     // Parameters
+      hadesKey.cryptoContext->GetRingDimension() / 2); // Number of slots
+
+  // Step 2: Sample a scaling factor uniformly from a predefined range
+  double scale = static_cast<double>(rand() % 10 + 1);
+
+  // Step 3: Add perturbation to plaintext value
+  double epsilon = 0.01;
+  double delta = ((double)rand() / RAND_MAX) * (2 * epsilon) - epsilon;
+  double perturbedValue = plaintextValue * scale + delta * scale;
+
+  // Step 4: Encrypt the perturbed value
+  Plaintext perturbedPlaintext =
+      hadesKey.cryptoContext->MakeCKKSPackedPlaintext(
+          {std::complex<double>(perturbedValue,
+                                0.0)}, // Wrap as a complex number
+          20,                           // Scale degree
+          0,                           // Level
+          nullptr,                     // Parameters
+          hadesKey.cryptoContext->GetRingDimension() / 2);
+  return hadesKey.cryptoContext->Encrypt(hadesKey.keyPair.publicKey,
+                                         perturbedPlaintext);
+}
+
+int hades_basic_compare(const HadesBasicKey &hadesKey,
+                        const Ciphertext<DCRTPoly> &ctA,
+                        const Ciphertext<DCRTPoly> &ctB) {
+  // Subtract ciphertexts to compute the difference
+  auto ctDelta = hadesKey.cryptoContext->EvalSub(ctA, ctB);
+
+  // Decrypt the result using CEK
+  Plaintext decryptedDelta;
+  hadesKey.cryptoContext->Decrypt(hadesKey.compareEvalKey, ctDelta,
+                                  &decryptedDelta);
+
+  // Extract the first value from the decrypted plaintext
+  auto deltaValue = decryptedDelta->GetCKKSPackedValue()[0];
+
+  // Interpret the result: 1 (A > B), 0 (A == B), -1 (A < B)
+  if (deltaValue.real() > 0) {
+    return 1;
+  } else if (std::abs(deltaValue) < 1e-6) { // Consider small values as zero
+    return 0;
+  } else {
+    return -1;
+  }
+}
+
+void test_hades_basic(const std::vector<double> &inputValues) {
+  using Clock = std::chrono::high_resolution_clock;
+
+  // Step 1: Generate key
+  auto hadesKey = hades_basic_keygen();
+
+  // Step 2: Measure encryption time
+  std::vector<Ciphertext<DCRTPoly>> encryptedValues;
+  auto startEncrypt = Clock::now();
+  for (const auto &val : inputValues) {
+    auto ct = hades_basic_encrypt(hadesKey, val);
+    encryptedValues.push_back(ct);
+  }
+  auto endEncrypt = Clock::now();
+  auto encryptTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endEncrypt - startEncrypt)
+                         .count();
+  double avgEncryptTime = static_cast<double>(encryptTime) / inputValues.size();
+
+  // Step 3: Measure comparison time
+  auto startCompare = Clock::now();
+  for (size_t i = 0; i < encryptedValues.size(); ++i) {
+    for (size_t j = i + 1; j < encryptedValues.size(); ++j) {
+      int result =
+          hades_basic_compare(hadesKey, encryptedValues[i], encryptedValues[j]);
+      (void)result;
+    }
+  }
+  auto endCompare = Clock::now();
+  auto compareTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endCompare - startCompare)
+                         .count();
+  double avgCompareTime = static_cast<double>(compareTime) /
+                          ((inputValues.size() * (inputValues.size() - 1)) / 2);
+
+  // Output results
+  std::cout << "HADES CKKS Basic Test Results:" << std::endl;
+  std::cout << "Average Encryption Time: " << avgEncryptTime
+            << " microseconds per value" << std::endl;
+  std::cout << "Average Comparison Time: " << avgCompareTime
+            << " microseconds per pair" << std::endl;
+}
+
+void test_hades_fae(const std::vector<double> &inputValues) {
+  using Clock = std::chrono::high_resolution_clock;
+
+  // Step 1: Generate HADES key
+  auto hadesKey = hades_basic_keygen();
+
+  // Step 2: Measure encryption time
+  std::vector<Ciphertext<DCRTPoly>> encryptedValues;
+  auto startEncrypt = Clock::now();
+  for (const auto &val : inputValues) {
+    auto ct = hades_fae_encrypt(hadesKey, val);
+    encryptedValues.push_back(ct);
+  }
+  auto endEncrypt = Clock::now();
+  auto encryptTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endEncrypt - startEncrypt)
+                         .count();
+  double avgEncryptTime = static_cast<double>(encryptTime) / inputValues.size();
+
+  // Step 3: Measure pair-wise comparison time
+  auto startCompare = Clock::now();
+  for (size_t i = 0; i < encryptedValues.size(); ++i) {
+    for (size_t j = i + 1; j < encryptedValues.size(); ++j) {
+      int result =
+          hades_basic_compare(hadesKey, encryptedValues[i], encryptedValues[j]);
+      (void)result; // Ignore the result in this benchmark
+    }
+  }
+  auto endCompare = Clock::now();
+  auto compareTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endCompare - startCompare)
+                         .count();
+  size_t totalPairs = (inputValues.size() * (inputValues.size() - 1)) / 2;
+  double avgCompareTime = static_cast<double>(compareTime) / totalPairs;
+
+  // Output results
+  std::cout << "HADES CKKS FA-Extension Test Results:" << std::endl;
+  std::cout << "Average Encryption Time: " << avgEncryptTime
+            << " microseconds per value" << std::endl;
+  std::cout << "Average Comparison Time: " << avgCompareTime
+            << " microseconds per pair" << std::endl;
+}
+
 void SimpleBootstrapExample();
 
-int main(int argc, char *argv[]) { SimpleBootstrapExample(); }
+int main(int argc, char *argv[]) { 
+  
+  SimpleBootstrapExample();
+
+  std::cout << std::endl;
+  std::cout << "======================= " << std::endl;
+  std::cout << "===== HPDIC Hades ===== " << std::endl;
+  std::cout << "======================= " << std::endl;
+  std::cout << std::endl;
+
+  std::vector<double> test_vec = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  test_hades_basic(test_vec);
+  test_hades_fae(test_vec);
+}
 
 void SimpleBootstrapExample() {
   CCParams<CryptoContextCKKSRNS> parameters;
