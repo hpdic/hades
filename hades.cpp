@@ -107,6 +107,50 @@ Ciphertext<DCRTPoly> hades_basic_encrypt(const HadesBasicKey &hadesKey,
   return hadesKey.cryptoContext->Encrypt(hadesKey.keyPair.publicKey, plaintext);
 }
 
+Ciphertext<DCRTPoly> hades_fae_encrypt(const HadesBasicKey &hadesKey,
+                                       const int64_t plaintextValue) {
+  // Step 1: Create plaintext object
+  Plaintext plaintext =
+      hadesKey.cryptoContext->MakePackedPlaintext({plaintextValue});
+
+  // Step 2: Sample a scaling factor uniformly from a predefined range
+  int scale = rand() % 10 + 1; // Example: scaling factor between 1 and 10
+
+  // Step 3: Sample a perturbation value from a bounded range
+  double epsilon = 0.01; // Example: small perturbation factor
+  double delta = ((double)rand() / RAND_MAX) * (2 * epsilon) -
+                 epsilon; // Range: [-epsilon, epsilon]
+
+  // Step 4: Sample a noise polynomial
+  std::vector<int64_t> noiseCoeffs = {rand() % 3, rand() % 3,
+                                      rand() % 3}; // Example noise
+  Plaintext noisePoly =
+      hadesKey.cryptoContext->MakePackedPlaintext(noiseCoeffs);
+
+  // Step 5: Modify the packed values of the plaintext
+  auto packedValues =
+      plaintext->GetPackedValue(); // Access the packed values (reference)
+  for (size_t i = 0; i < packedValues.size(); ++i) {
+    packedValues[i] =
+        packedValues[i] * scale + static_cast<int64_t>(delta * scale);
+  }
+
+  // Add noise polynomial to the modified plaintext
+  auto combinedPlaintext =
+      hadesKey.cryptoContext->MakePackedPlaintext(packedValues);
+
+  auto combinedCipher = hadesKey.cryptoContext->Encrypt(
+      hadesKey.keyPair.publicKey, combinedPlaintext);
+  auto noiseCipher =
+      hadesKey.cryptoContext->Encrypt(hadesKey.keyPair.publicKey, noisePoly);
+  auto resultCipher =
+      hadesKey.cryptoContext->EvalAdd(noiseCipher, combinedCipher);
+
+  // Step 6: Encrypt the modified plaintext
+  return hadesKey.cryptoContext->Encrypt(hadesKey.keyPair.publicKey,
+                                         combinedPlaintext);
+}
+
 // Hades Basic: Comparison
 int hades_basic_compare(const HadesBasicKey &hadesKey,
                         const Ciphertext<DCRTPoly> &ctA,
@@ -181,6 +225,50 @@ void test_hades_basic(const std::vector<int> &inputIntegers) {
   std::cout << "HADES Basic Test Results:" << std::endl;
   std::cout << "Key Generation Time: " << keygenTime << " microseconds"
             << std::endl;
+  std::cout << "Average Encryption Time: " << avgEncryptTime
+            << " microseconds per integer" << std::endl;
+  std::cout << "Average Comparison Time: " << avgCompareTime
+            << " microseconds per pair" << std::endl;
+}
+
+void test_hades_fae(const std::vector<int> &inputIntegers) {
+  using Clock = std::chrono::high_resolution_clock;
+
+  // Step 1: Generate HADES key
+  auto hadesKey = hades_basic_keygen();
+
+  // Step 2: Measure encryption time
+  std::vector<Ciphertext<DCRTPoly>> encryptedIntegers;
+  auto startEncrypt = Clock::now();
+  for (const auto &val : inputIntegers) {
+    auto ct = hades_fae_encrypt(hadesKey, val);
+    encryptedIntegers.push_back(ct);
+  }
+  auto endEncrypt = Clock::now();
+  auto encryptTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endEncrypt - startEncrypt)
+                         .count();
+  double avgEncryptTime =
+      static_cast<double>(encryptTime) / inputIntegers.size();
+
+  // Step 3: Measure pair-wise comparison time
+  auto startCompare = Clock::now();
+  for (size_t i = 0; i < encryptedIntegers.size(); ++i) {
+    for (size_t j = i + 1; j < encryptedIntegers.size(); ++j) {
+      int result = hades_basic_compare(hadesKey, encryptedIntegers[i],
+                                       encryptedIntegers[j]);
+      (void)result; // Ignore the result in this benchmark
+    }
+  }
+  auto endCompare = Clock::now();
+  auto compareTime = std::chrono::duration_cast<std::chrono::microseconds>(
+                         endCompare - startCompare)
+                         .count();
+  size_t totalPairs = (inputIntegers.size() * (inputIntegers.size() - 1)) / 2;
+  double avgCompareTime = static_cast<double>(compareTime) / totalPairs;
+
+  // Output results
+  std::cout << "HADES FA-Extension Test Results:" << std::endl;
   std::cout << "Average Encryption Time: " << avgEncryptTime
             << " microseconds per integer" << std::endl;
   std::cout << "Average Comparison Time: " << avgCompareTime
@@ -296,6 +384,7 @@ int main() {
 
   std::vector<int> test_vec = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   test_hades_basic(test_vec);
+  test_hades_fae(test_vec);
 
-  return 0;
+    return 0;
 }
