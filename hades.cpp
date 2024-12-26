@@ -80,6 +80,7 @@ struct HadesBasicKey {
   PrivateKey<DCRTPoly> compareEvalKey; // Compare-Eval Key (CEK) as Ciphertext
 };
 
+// TODO: Move the "scale" from secret key to parameters
 HadesBasicKey hades_basic_keygen() {
   // Set up BFV parameters
   CCParams<CryptoContextBFVRNS> parameters;
@@ -181,6 +182,7 @@ Ciphertext<DCRTPoly> hades_fae_encrypt(const HadesBasicKey &hadesKey,
                                          combinedPlaintext);
 }
 
+// TODO: need to multiple ct0 by the "scale" for comparison eval.
 // Hades Basic: Comparison
 int hades_basic_compare(const HadesBasicKey &hadesKey,
                         const Ciphertext<DCRTPoly> &ctA,
